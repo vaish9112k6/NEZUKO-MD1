@@ -3,8 +3,7 @@ const {
   default: makeWASocket,
   useMultiFileAuthState,
   Browsers,
-  delay,
-  makeInMemoryStore,
+  delay
 } = require("@whiskeysockets/baileys");
 
 const fs = require("fs");
@@ -17,8 +16,6 @@ const events = require("./lib/event");
 const config = require("./config");
 
 require("events").EventEmitter.defaultMaxListeners = 500;
-
-const store = makeInMemoryStore({ logger: pino({ level: "silent" }) });
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -49,7 +46,9 @@ async function startBot() {
   }
 
   console.log("Syncing Database...");
-  await config.DATABASE.sync();
+  if (config.DATABASE && typeof config.DATABASE.sync === 'function') {
+      await config.DATABASE.sync();
+  }
 
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir, pino({ level: "silent" }));
 
@@ -66,11 +65,6 @@ async function startBot() {
     downloadHistory: false,
     syncFullHistory: false,
   });
-
-  store.bind(conn.ev);
-  setInterval(() => {
-    store.writeToFile("./lib/store_db.json");
-  }, 30 * 60 * 1000);
 
   conn.ev.on("connection.update", async (s) => {
     const { connection, lastDisconnect } = s;
@@ -104,10 +98,10 @@ async function startBot() {
         if (m.type !== "notify") return;
         const ms = m.messages[0];
         
-        const msg = ms; 
-        msg.from = ms.key.remoteJid;
-        msg.sender = ms.key.participant || ms.key.remoteJid;
-        const text_msg = ms.message?.conversation || ms.message?.extendedTextMessage?.text || "";
+        const msg = serialize(ms, conn); 
+        if (!msg) return;
+
+        const text_msg = msg.body || "";
 
         for (const command of events.commands) {
           if (command.fromMe && config.WORK_TYPE === 'private' && !ms.key.fromMe) continue;
