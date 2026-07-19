@@ -1,121 +1,130 @@
-const { 
-    default: makeWASocket, 
-    useMultiFileAuthState, 
-    DisconnectReason, 
-    makeCacheableSignalKeyStore 
-} = require('@whiskeysockets/baileys');
-const pino = require('pino');
-const express = require('express');
-const fs = require('fs');
-const path = require('path');
-require('dotenv').config();
+require("dotenv").config();
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  Browsers,
+  delay,
+  makeInMemoryStore,
+} = require("@whiskeysockets/baileys");
+
+const fs = require("fs");
+const path = require("path");
+const express = require("express");
+const pino = require("pino");
+const { serialize } = require("./lib/serialize"); // Ensure you have a basic serialize file
+const { Message, Image, Sticker } = require("./lib/Base");
+const events = require("./lib/event");
+const config = require("./config");
+
+require("events").EventEmitter.defaultMaxListeners = 500;
+
+const store = makeInMemoryStore({ logger: pino({ level: "silent" }) });
 
 const app = express();
-const PORT = process.env.PORT || 3000;
-const PREFIX = process.env.PREFIX || '!';
+const port = process.env.PORT || 3000;
 
-// Express server to keep Render happy
-app.get('/', (req, res) => res.send('Bot is running properly!'));
-app.listen(PORT, () => console.log(`Web server listening on port ${PORT}`));
+app.get("/", (req, res) => res.send("Nezuko-MD is alive"));
+app.listen(port, () => console.log(`Web server running on port ${port}`));
 
-// Session Decoder Logic
-const sessionDir = path.join(__dirname, 'session_auth');
-if (!fs.existsSync(sessionDir)) {
+async function Zenox() {
+  const sessionDir = "./lib/session";
+  const sessionPath = `${sessionDir}/creds.json`;
+
+  if (!fs.existsSync(sessionDir)) {
     fs.mkdirSync(sessionDir, { recursive: true });
-}
+  }
 
-const sessionId = process.env.SESSION_ID;
-if (sessionId && sessionId.startsWith('Nezuko~')) {
-    const credsPath = path.join(sessionDir, 'creds.json');
-    if (!fs.existsSync(credsPath)) {
-        console.log('Decoding session ID...');
-        const base64Data = sessionId.split('Nezuko~')[1];
-        const decodedCreds = Buffer.from(base64Data, 'base64').toString('utf-8');
-        fs.writeFileSync(credsPath, decodedCreds);
+  if (!fs.existsSync(sessionPath) && config.SESSION_ID) {
+    try {
+      let b64 = config.SESSION_ID.startsWith("Nezuko~") 
+        ? config.SESSION_ID.split('Nezuko~')[1] 
+        : config.SESSION_ID;
+        
+      const decodedCreds = Buffer.from(b64, 'base64').toString('utf-8');
+      fs.writeFileSync(sessionPath, decodedCreds);
+      console.log("Session ID successfully decoded and saved ✅");
+    } catch (err) {
+      console.error("Failed to decode Session ID. Check Render Environment Variables.");
     }
-} else if (!fs.existsSync(path.join(sessionDir, 'creds.json'))) {
-    console.error('CRITICAL: No valid SESSION_ID found in environment variables.');
+  }
+
+  console.log("Syncing Database...");
+  await config.DATABASE.sync();
+
+  const { state, saveCreds } = await useMultiFileAuthState(sessionDir, pino({ level: "silent" }));
+
+  // Render Crash Fix: Removed the readline terminal prompt.
+  // It will strictly rely on the SESSION_ID provided in environment variables.
+  if (!state.creds || !state.creds.registered) {
+      console.error("CRITICAL: No valid session found. Please provide a valid SESSION_ID in Render Environment Variables.");
+      return; 
+  }
+
+  const conn = makeWASocket({
+    logger: pino({ level: "silent" }),
+    auth: state,
+    printQRInTerminal: false,
+    browser: ["Nezuko-MD", "Chrome", "1.0.0"],
+    downloadHistory: false,
+    syncFullHistory: false,
+  });
+
+  store.bind(conn.ev);
+  setInterval(() => {
+    store.writeToFile("./lib/store_db.json");
+  }, 30 * 60 * 1000);
+
+  conn.ev.on("connection.update", async (s) => {
+    const { connection, lastDisconnect } = s;
+
+    if (connection === "close" && lastDisconnect?.error?.output?.statusCode !== 401) {
+      console.log("Connection closed, reconnecting...");
+      Zenox();
+    }
+
+    if (connection === "open") {
+      console.log("Connected To Whatsapp ✅\nLoading Plugins...");
+
+      // Load local plugins
+      if (fs.existsSync("./plugins")) {
+        fs.readdirSync("./plugins").forEach((plugin) => {
+          if (path.extname(plugin).toLowerCase() === ".js") {
+            require("./plugins/" + plugin);
+          }
+        });
+      }
+      
+      console.log(`Plugins Loaded ✅ Total: ${events.commands.length}`);
+
+      const str = `*㋚ ɴᴇᴢᴜᴋᴏ ꜱᴛᴀʀᴛᴇᴅ*\n\n*⌑ ᴩʟᴜɢɪɴꜱ* : *${events.commands.length}* \n*⌑ ᴡᴏʀᴋ ᴛʏᴩᴇ* : *${config.WORK_TYPE}*`;
+      if (conn.user?.id) {
+        conn.sendMessage(conn.user.id, { text: str });
+      }
+
+      conn.ev.on("creds.update", saveCreds);
+
+      conn.ev.on("messages.upsert", async (m) => {
+        if (m.type !== "notify") return;
+        const ms = m.messages[0];
+        
+        // Basic message parser if serialize is missing complex logic
+        const msg = ms; 
+        msg.from = ms.key.remoteJid;
+        msg.sender = ms.key.participant || ms.key.remoteJid;
+        const text_msg = ms.message?.conversation || ms.message?.extendedTextMessage?.text || "";
+
+        for (const command of events.commands) {
+          if (command.fromMe && config.WORK_TYPE === 'private' && !ms.key.fromMe) continue;
+
+          if (text_msg && command.pattern && command.pattern.test(text_msg)) {
+            let match = text_msg.replace(command.pattern, "").trim();
+            const whats = new Message(conn, msg, ms);
+            command.function(whats, match, msg, conn);
+          } 
+        }
+      });
+    }
+  });
 }
 
-// Spam Protection Tracker
-const spamMap = new Map();
-
-async function startBot() {
-    const { state, saveCreds } = await useMultiFileAuthState(sessionDir);
-
-    const sock = makeWASocket({
-        auth: {
-            creds: state.creds,
-            keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
-        },
-        logger: pino({ level: 'silent' }),
-        printQRInTerminal: false,
-        browser: ["Nezuko-MD", "Chrome", "1.0.0"]
-    });
-
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect } = update;
-        if (connection === 'close') {
-            const shouldReconnect = lastDisconnect.error?.output?.statusCode !== DisconnectReason.loggedOut;
-            console.log('Connection closed. Reconnecting:', shouldReconnect);
-            if (shouldReconnect) {
-                startBot();
-            } else {
-                console.log('Logged out. Please generate a new SESSION_ID.');
-                fs.rmSync(sessionDir, { recursive: true, force: true });
-            }
-        } else if (connection === 'open') {
-            console.log('Bot successfully connected to WhatsApp!');
-        }
-    });
-
-    sock.ev.on('messages.upsert', async (m) => {
-        const msg = m.messages[0];
-        if (!msg.message || msg.key.fromMe) return;
-
-        const sender = msg.key.remoteJid;
-        const messageType = Object.keys(msg.message)[0];
-        const text = msg.message.conversation || 
-                     msg.message[messageType]?.text || 
-                     msg.message[messageType]?.caption || '';
-
-        // Spam Detection System
-        const now = Date.now();
-        if (!spamMap.has(sender)) spamMap.set(sender, []);
-        
-        const userTimestamps = spamMap.get(sender);
-        userTimestamps.push(now);
-        
-        const recentMessages = userTimestamps.filter(t => now - t < 10000);
-        spamMap.set(sender, recentMessages);
-
-        if (recentMessages.length > 6) {
-            console.log(`Spam detected from ${sender}. Blocking user.`);
-            await sock.updateBlockStatus(sender, 'block');
-            spamMap.delete(sender); 
-            return; 
-        }
-
-        // Command Handler
-        if (text.startsWith(PREFIX)) {
-            const args = text.slice(PREFIX.length).trim().split(/ +/);
-            const command = args.shift().toLowerCase();
-
-            if (command === 'ping') {
-                await sock.sendMessage(sender, { text: 'Pong! 🏓 Nezuko is active.' }, { quoted: msg });
-            }
-
-            if (command === 'menu') {
-                const menuText = `*NEZUKO-MD MENU*\n\nPrefix: [ ${PREFIX} ]\n\n- ${PREFIX}ping\n- ${PREFIX}menu\n\n_More features coming soon..._`;
-                await sock.sendMessage(sender, { text: menuText }, { quoted: msg });
-            }
-            
-            // Add more commands here following the same structure
-        }
-    });
-}
-
-startBot();
-
+Zenox();
