@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: nezuko-md
+    env: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: SESSION_ID
+        sync: false 
+      - key: PREFIX
+        value: "."
+      - key: WORK_TYPE
+        value: "public"
+      - key: LOGS
+        value: "true"
+      - key: SUDO
+        sync: false
+        
