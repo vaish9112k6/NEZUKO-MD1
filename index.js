@@ -11,7 +11,7 @@ const fs = require("fs");
 const path = require("path");
 const express = require("express");
 const pino = require("pino");
-const { serialize } = require("./lib/serialize"); // Ensure you have a basic serialize file
+const { serialize } = require("./lib/serialize");
 const { Message, Image, Sticker } = require("./lib/Base");
 const events = require("./lib/event");
 const config = require("./config");
@@ -26,7 +26,7 @@ const port = process.env.PORT || 3000;
 app.get("/", (req, res) => res.send("Nezuko-MD is alive"));
 app.listen(port, () => console.log(`Web server running on port ${port}`));
 
-async function Zenox() {
+async function startBot() {
   const sessionDir = "./lib/session";
   const sessionPath = `${sessionDir}/creds.json`;
 
@@ -53,8 +53,6 @@ async function Zenox() {
 
   const { state, saveCreds } = await useMultiFileAuthState(sessionDir, pino({ level: "silent" }));
 
-  // Render Crash Fix: Removed the readline terminal prompt.
-  // It will strictly rely on the SESSION_ID provided in environment variables.
   if (!state.creds || !state.creds.registered) {
       console.error("CRITICAL: No valid session found. Please provide a valid SESSION_ID in Render Environment Variables.");
       return; 
@@ -79,13 +77,12 @@ async function Zenox() {
 
     if (connection === "close" && lastDisconnect?.error?.output?.statusCode !== 401) {
       console.log("Connection closed, reconnecting...");
-      Zenox();
+      startBot();
     }
 
     if (connection === "open") {
       console.log("Connected To Whatsapp ✅\nLoading Plugins...");
 
-      // Load local plugins
       if (fs.existsSync("./plugins")) {
         fs.readdirSync("./plugins").forEach((plugin) => {
           if (path.extname(plugin).toLowerCase() === ".js") {
@@ -107,7 +104,6 @@ async function Zenox() {
         if (m.type !== "notify") return;
         const ms = m.messages[0];
         
-        // Basic message parser if serialize is missing complex logic
         const msg = ms; 
         msg.from = ms.key.remoteJid;
         msg.sender = ms.key.participant || ms.key.remoteJid;
@@ -127,4 +123,4 @@ async function Zenox() {
   });
 }
 
-Zenox();
+startBot();
